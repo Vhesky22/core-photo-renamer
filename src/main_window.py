@@ -6,14 +6,18 @@ from PyQt5.QtWidgets import (QMainWindow, QVBoxLayout, QHBoxLayout, QWidget, QAp
                              QListWidget, QPushButton, QComboBox, QDesktopWidget, QFileDialog,
                              QLineEdit, QLabel, QGroupBox, QSplitter, QTableWidget, QSizePolicy, QShortcut,
                              QRadioButton, QAbstractItemView, QFileDialog, QMessageBox, QTableWidgetItem, QCheckBox)
-from PyQt5.QtGui import QPixmap, QImage, QPainter, QKeySequence, QFont, QColor, QIcon
-from PyQt5.QtCore import Qt, QTimer
+from PyQt5.QtGui import QPixmap, QImage, QPainter, QKeySequence, QFont, QColor, QIcon, QIntValidator, QDoubleValidator, QPalette
+from PyQt5.QtCore import Qt, QTimer, QLocale
 
 
 
 class ResponsiveMainWindow(QMainWindow):
     def __init__(self):
         super(ResponsiveMainWindow, self).__init__()
+
+        self.countdown_running = False
+        self.new_row_index = None  # To store the index of the newly added row
+        self.is_edit_mode = False  # Initial edit mode state
 
         # Set up window title
         self.setWindowTitle("CORE PHOTO VIEWER")
@@ -29,6 +33,7 @@ class ResponsiveMainWindow(QMainWindow):
         self.suppress_img_warning = False
         self.setup_ui()
         self.setup_file_explorer()
+        self.setup_validators()
 
         # Add keyboard shortcuts for Previous (F2) and Next (F3) image
         self.shortcut_previous = QShortcut(QKeySequence(Qt.Key_F2), self)
@@ -197,7 +202,9 @@ class ResponsiveMainWindow(QMainWindow):
 
         # QComboBox for Hole ID items
         self.hole_id_items = QComboBox()
-        self.hole_id_items.setPlaceholderText("Select Hole ID")
+        # Connect the QComboBox signal to the filtering function
+        self.hole_id_items.currentIndexChanged.connect(self.filter_core_photo_records_by_hole_id)
+
 
         # QTableWidget for core photo records
         self.core_photo_records_tbl = QTableWidget()
@@ -206,6 +213,8 @@ class ResponsiveMainWindow(QMainWindow):
         self.core_photo_records_tbl.setHorizontalHeaderLabels(['HOLE ID', 'FROM', 'TO', 'LENGTH', 'BOX #', 'CORE PHOTO TYPE'])
         self.core_photo_records_tbl.setEditTriggers(QAbstractItemView.NoEditTriggers)
         self.core_photo_records_tbl.itemClicked.connect(self.on_item_clicked)
+
+
 
 
         self.core_photo_records_tbl.setSelectionBehavior(QTableWidget.SelectRows)#highlight the entire row when selected
@@ -232,7 +241,10 @@ class ResponsiveMainWindow(QMainWindow):
         #self.add_rows_button.setStyleSheet("margin-left: 5px; margin-right: 5px;")
         self.delete_row = QPushButton("Delete Row")
         self.delete_row.clicked.connect(self.delete_selected_row)
-        
+
+        #Adding ctlr+enter key to skip the countdown
+        ctrl_enter_shortcut = QShortcut(QKeySequence("Ctrl+Return"), self)
+        ctrl_enter_shortcut.activated.connect(self.skip_countdown_and_rename)
 
         misc_buttons_layout.addWidget(self.edit_button)
         misc_buttons_layout.addWidget(self.add_rows_button)
@@ -297,6 +309,46 @@ class ResponsiveMainWindow(QMainWindow):
             self.on_list_widget_item_changed(next_item, None)
 
     def toggle_edit_mode(self):
+        if self.new_row_index is not None:  # Check if a new row has been added
+            # Prompt the user with a message box when toggling edit mode off
+            msg_box = QMessageBox(self)
+            msg_box.setWindowTitle("Save Changes?")
+            msg_box.setText("Do you want to save the changes to the new row?")
+            msg_box.setStandardButtons(QMessageBox.Save | QMessageBox.Discard | QMessageBox.Cancel)
+            msg_box.setDefaultButton(QMessageBox.Save)
+
+            reply = msg_box.exec_()
+
+            if reply == QMessageBox.Save:
+                # Handle Save: Collect data from the new row and save to the database
+                hole_id = self.core_photo_records_tbl.item(self.new_row_index, 0).text()
+                top_length = float(self.core_photo_records_tbl.item(self.new_row_index, 1).text())
+                bottom_length = float(self.core_photo_records_tbl.item(self.new_row_index, 2).text())
+                total_length = bottom_length - top_length
+                box_id = self.core_photo_records_tbl.item(self.new_row_index, 4).text()
+                core_size = self.core_photo_records_tbl.item(self.new_row_index, 5).text()
+
+                # Save data to database
+                cursor = self.connection.cursor()
+                cursor.execute("""
+                    INSERT INTO core_data (hole_id, top_length, bottom_length, total_length, box_id, core_size)
+                    VALUES (?, ?, ?, ?, ?, ?)
+                """, (hole_id, top_length, bottom_length, total_length, box_id, core_size))
+                self.connection.commit()
+
+                # Reset the new row tracker
+                self.new_row_index = None
+
+            elif reply == QMessageBox.Discard:
+                # Handle Discard: Remove the newly added row
+                self.core_photo_records_tbl.removeRow(self.new_row_index)
+                self.new_row_index = None
+
+            elif reply == QMessageBox.Cancel:
+                # Handle Cancel: Do nothing and return to edit mode
+                return  # Exit the function without disabling edit mode
+
+        # Toggle edit mode
         self.is_edit_mode = not self.is_edit_mode  # Toggle edit mode state
         if self.is_edit_mode:
             self.core_photo_records_tbl.setEditTriggers(QAbstractItemView.DoubleClicked | QAbstractItemView.EditKeyPressed)
@@ -305,20 +357,78 @@ class ResponsiveMainWindow(QMainWindow):
             self.core_photo_records_tbl.setEditTriggers(QAbstractItemView.NoEditTriggers)
             self.edit_button.setText("Edit")
     
+
+    
     def on_item_clicked(self, item):
         if self.is_edit_mode:
             self.core_photo_records_tbl.editItem(item)  # Start editing the clicked item
 
-    
     def add_row(self):
-        row_count = self.core_photo_records_tbl.rowCount()
-        self.core_photo_records_tbl.insertRow(row_count)
+        # Add a new row at the end of the table
+        row_position = self.core_photo_records_tbl.rowCount()
+        self.core_photo_records_tbl.insertRow(row_position)
+
+        # Store the newly added row index to track it
+        self.new_row_index = row_position
+
+        # Optionally, make sure this row is highlighted or visible for the user
+        self.core_photo_records_tbl.scrollToItem(self.core_photo_records_tbl.item(row_position, 0))
+
+
     
     def delete_selected_row(self):
-        if self.is_edit_mode:  # Check if in edit mode
+        if self.is_edit_mode:  # Ensure it's in edit mode
             current_row = self.core_photo_records_tbl.currentRow()
             if current_row >= 0:  # Ensure a row is selected
-                self.core_photo_records_tbl.removeRow(current_row)
+                # Get data from the selected row to identify the record in the database
+                hole_id = self.core_photo_records_tbl.item(current_row, 0).text()  # Assuming 'HOLE ID' is in column 0
+                top_length = self.core_photo_records_tbl.item(current_row, 1).text()  # Assuming 'FROM' is in column 1
+
+                # Confirm deletion from the user
+                reply = QMessageBox.question(
+                    self, "Confirm Delete", 
+                    f"Are you sure you want to delete the record for Hole ID: {hole_id} and Top Length: {top_length}?",
+                    QMessageBox.Yes | QMessageBox.No
+                )
+
+                if reply == QMessageBox.Yes:
+                    try:
+                        # Delete the row from the database
+                        cursor = self.connection.cursor()
+                        cursor.execute("""
+                            DELETE FROM core_data 
+                            WHERE hole_id = ? AND top_length = ?
+                        """, (hole_id, top_length))
+                        self.connection.commit()
+
+                        # Remove the row from the table
+                        self.core_photo_records_tbl.removeRow(current_row)
+                        QMessageBox.information(self, "Deleted", "Record successfully deleted.")
+                        
+                    except Exception as e:
+                        QMessageBox.critical(self, "Error", f"Failed to delete record from database: {str(e)}")
+                else:
+                    return
+                
+    #Validators
+
+    def setup_validators(self):
+        """
+        Sets validators for input fields to allow only numbers.
+        """
+        # Validator for decimal numbers (for lengths)
+        double_validator = QDoubleValidator(0.0, 999999.99, 2)  # Range (0, 999999.99) with 2 decimal places
+        double_validator.setNotation(QDoubleValidator.StandardNotation)  # Standard decimal notation
+        double_validator.setLocale(QLocale(QLocale.English))  # Ensures '.' is used as the decimal separator
+
+        # Validator for integer numbers (for box_id)
+        int_validator = QIntValidator(0, 999999)  # Adjust the range based on your box_id limits
+
+        # Apply validators to input fields
+        self.input_from_length.setValidator(double_validator)  # Only decimal numbers
+        self.input_to_length.setValidator(double_validator)    # Reuse the same validator for both fields
+        self.box_id.setValidator(int_validator)                # Only integers
+
 
     def setup_file_explorer(self):
         """
@@ -433,8 +543,61 @@ class ResponsiveMainWindow(QMainWindow):
                     # Display the image
                     pixmap = QPixmap(file_path)
                     self.image_viewer.setPixmap(pixmap.scaled(self.image_viewer.size(), Qt.KeepAspectRatio, Qt.SmoothTransformation))
+        
+    def populate_hole_id_combobox(self):
+        try:
+            cursor = self.connection.cursor()
+            cursor.execute("SELECT DISTINCT hole_id FROM core_data")
+            hole_ids = cursor.fetchall()
 
+            # Clear the QComboBox before populating
+            self.hole_id_items.clear()
+            self.hole_id_items.addItem("All")  # Add an 'All' option to display all records
+
+            # Populate the QComboBox with distinct hole_ids
+            for hole_id in hole_ids:
+                self.hole_id_items.addItem(hole_id[0])
+
+        except Exception as e:
+            QMessageBox.critical(self, "Error", f"Failed to populate hole_id: {str(e)}")
     
+
+    def filter_core_photo_records_by_hole_id(self):
+        try:
+            # Get the selected hole_id from the combo box
+            selected_hole_id = self.hole_id_items.currentText()
+
+            # Clear the table before populating with new data
+            self.core_photo_records_tbl.setRowCount(0)
+
+            # SQL query to fetch data based on the selected hole_id
+            query = "SELECT hole_id, top_length, bottom_length, total_length, box_id, core_size FROM core_data"
+            
+            if selected_hole_id != "All":
+                query += " WHERE hole_id = ?"
+                data = self.connection.cursor().execute(query, (selected_hole_id,))
+            else:
+                # If "All" is selected, retrieve all records
+                data = self.connection.cursor().execute(query)
+
+            # Fetch data and populate the table
+            records = data.fetchall()
+            for row_number, row_data in enumerate(records):
+                self.core_photo_records_tbl.insertRow(row_number)
+                for column_number, cell_data in enumerate(row_data):
+                    # Format total_length (index 3) to 2 decimal places
+                    if column_number == 3:  # total_length column
+                        formatted_value = f"{float(cell_data):.2f}"
+                        self.core_photo_records_tbl.setItem(row_number, column_number, QTableWidgetItem(formatted_value))
+                    else:
+                        self.core_photo_records_tbl.setItem(row_number, column_number, QTableWidgetItem(str(cell_data)))
+
+        except Exception as e:
+            QMessageBox.critical(self, "Error", f"Failed to filter records by hole_id: {str(e)}")
+
+
+
+
     def create_database(self):
         # Open a file dialog to get the file path for the database
         options = QFileDialog.Options()
@@ -481,6 +644,8 @@ class ResponsiveMainWindow(QMainWindow):
 
                 # Clear the current contents of the table
                 self.core_photo_records_tbl.setRowCount(0)
+
+                self.populate_hole_id_combobox()
 
                 # Query to select all records from the core_data table
                 cursor.execute("SELECT hole_id, top_length, bottom_length, total_length, box_id FROM core_data")
@@ -532,7 +697,7 @@ class ResponsiveMainWindow(QMainWindow):
         data.columns = ['HOLE ID', 'FROM', 'TO', 'LENGTH', 'BOX NUMBER', 'CORE PHOTO TYPE']  # Rename columns
         data.to_csv(file_name, index=False)  # Export to CSV
         QMessageBox.information(self, "Export Successful", "Data exported to CSV successfully.")
-    
+
     def add_box_data(self):
         if self.is_duplicate_entry():
             QMessageBox.warning(self, "Duplicate Entry", "This entry already exists.")
@@ -616,19 +781,34 @@ class ResponsiveMainWindow(QMainWindow):
             """, (hole_id, top_length, bottom_length, total_length, box_id, core_size))
             self.connection.commit()
 
-            # Rename the selected item using the original file data
+            # Update the QListWidget or any other UI component
             self.rename_selected_list_item(hole_id, top_length, bottom_length, current_file_data)
 
-            # Clear input fields
+            # Automatically focus on the last row of the table after inserting data
+            row_count = self.core_photo_records_tbl.rowCount()
+
+            # Insert a new row into the table (if needed, based on your implementation)
+            self.core_photo_records_tbl.insertRow(row_count)
+
+            # Set the data for the newly added row (modify this based on what data you show)
+            self.core_photo_records_tbl.setItem(row_count, 0, QTableWidgetItem(str(hole_id)))
+            self.core_photo_records_tbl.setItem(row_count, 1, QTableWidgetItem(str(top_length)))
+            self.core_photo_records_tbl.setItem(row_count, 2, QTableWidgetItem(str(bottom_length)))
+            self.core_photo_records_tbl.setItem(row_count, 3, QTableWidgetItem(str(total_length)))
+            self.core_photo_records_tbl.setItem(row_count, 4, QTableWidgetItem(str(box_id)))
+            self.core_photo_records_tbl.setItem(row_count, 5, QTableWidgetItem(core_size))
+
+            # Clear input fields after the data is committed and table is updated
             self.clear_input_fields()
 
-            # Get the newly added row index (last row)
-            new_row_index = self.core_photo_records_tbl.rowCount() - 1
-
             # Highlight the newly added row in gold for 5 seconds
-            self.highlight_row(new_row_index)
+            self.highlight_row(row_count)
 
-            # Now, jump to the first item containing "IMG_"
+            # Scroll to the last row and set it as the current selection
+            self.core_photo_records_tbl.scrollToItem(self.core_photo_records_tbl.item(row_count, 0))
+            self.core_photo_records_tbl.setCurrentCell(row_count, 0)
+
+            # Optionally jump to the first item containing "IMG_" if needed
             self.jump_to_img_placeholder()
 
         except Exception as e:
@@ -636,6 +816,7 @@ class ResponsiveMainWindow(QMainWindow):
 
         finally:
             self.current_task = None  # Clear the current task
+
     
     def refresh_list_widget(self):
         """
@@ -668,27 +849,6 @@ class ResponsiveMainWindow(QMainWindow):
         else:
             self.list_widget.setCurrentRow(self.list_widget.count() - 1)  # Stay at the last item
     
-    def add_box_data(self):
-        if self.is_duplicate_entry():
-            QMessageBox.warning(self, "Duplicate Entry", "This entry already exists.")
-            return
-
-        # Get current selected file data
-        current_file_data = self.list_widget.currentItem().data(Qt.UserRole)
-        
-        # Queue the current file and its associated data
-        task = {
-            "hole_id": self.hole_id_edit.text(),
-            "top_length": float(self.input_from_length.text()),
-            "bottom_length": float(self.input_to_length.text()),
-            "box_id": self.box_id.text(),
-            "current_file_data": current_file_data
-        }
-        self.task_queue.append(task)
-
-        # Start the countdown if it's not already active
-        if not self.is_countdown_active:
-            self.start_countdown()
     
     def jump_to_img_placeholder(self):
         """
@@ -794,20 +954,30 @@ class ResponsiveMainWindow(QMainWindow):
         count = cursor.fetchone()[0]
         return count > 0  # Return True if there's a duplicate
 
-    #Escape the countdown using key binding ctrl+enter
+
     def keyPressEvent(self, event):
         """
-        Override the keyPressEvent to handle custom key bindings.
+        Override keyPressEvent to handle custom key bindings.
         """
-        # Check if Ctrl + Enter is pressed
-        if event.key() in [Qt.Key_Return, Qt.Key_Enter] and event.modifiers() == Qt.ControlModifier:
-            # Handle Ctrl + Enter (skip countdown)
-            self.skip_countdown_and_rename()
-        elif event.key() in [Qt.Key_Return, Qt.Key_Enter]:
-            # Handle regular Enter key (execute Add Box button)
-            self.add_box_button.click()  # Trigger the Add Box button programmatically
+        # Check if Delete key is pressed
+        if event.key() == Qt.Key_Delete:
+            self.delete_selected_row()  # Trigger the delete function
+
+        # Check if Enter or Numpad Enter is pressed
+        elif (event.key() == Qt.Key_Return or event.key() == Qt.Key_Enter):
+            # If the countdown is already active, skip it
+            if self.is_countdown_active:
+                self.skip_countdown_and_rename()  # Skip countdown and process task immediately
+            else:
+                self.start_countdown()  # Start countdown if it's not active
+
+        # We no longer need the Ctrl + Enter check here as it's handled by the QShortcut
         else:
             super().keyPressEvent(event)
+
+
+
+
 
     def skip_countdown_and_rename(self):
         """
@@ -818,13 +988,6 @@ class ResponsiveMainWindow(QMainWindow):
             self.cancel_btn.setVisible(False)  # Hide the cancel button
             self.is_countdown_active = False  # Reset countdown flag
             self.perform_add_box_data()  # Immediately perform the task
-
-
-    """
-    To-Do:
-    1. Create a revert mechanism that has 5 seconds countdown to revert the renaming process and the saving to database process. 
-    2. Create a Delete button to delete a record in the database by using the self.core_photo_records_tbl as a front-end (syempre).
-    """
 
 
     def highlight_row(self, row_index):
@@ -838,11 +1001,23 @@ class ResponsiveMainWindow(QMainWindow):
         QTimer.singleShot(5000, lambda: self.revert_row_color(row_index))
 
     def revert_row_color(self, row_index):
-        # Revert the row's background color to default
+        """
+        Reverts the background color of the specified row to the default color or
+        handles alternating row colors (if applicable).
+        """
+        # Get the system's default background color for the table
+        default_color = self.core_photo_records_tbl.palette().color(QPalette.Base)
+
+        # Handle alternating row colors (striped effect) if needed
+        if row_index % 2 == 1:
+            default_color = self.core_photo_records_tbl.palette().color(QPalette.AlternateBase)
+
+        # Revert each item in the row to the appropriate default color
         for column in range(self.core_photo_records_tbl.columnCount()):
             item = self.core_photo_records_tbl.item(row_index, column)
             if item:
-                item.setBackground(QColor('white'))  # You can use the default background color here
+                item.setBackground(default_color)
+
 
     
     # Method for loading images in image viewer with dynamic size
