@@ -36,10 +36,12 @@ class ResponsiveMainWindow(QMainWindow):
         self.setup_validators()
 
         # Add keyboard shortcuts for Previous (F2) and Next (F3) image
+        self.start_input = QShortcut(QKeySequence(Qt.Key_F1), self)
         self.shortcut_previous = QShortcut(QKeySequence(Qt.Key_F2), self)
         self.shortcut_next = QShortcut(QKeySequence(Qt.Key_F3), self)
 
         # Connect shortcuts to the appropriate methods
+        self.start_input.activated.connect(self.focus_input_from_length)
         self.shortcut_previous.activated.connect(self.show_previous_image)
         self.shortcut_next.activated.connect(self.show_next_image)
 
@@ -286,6 +288,12 @@ class ResponsiveMainWindow(QMainWindow):
 
         # Dynamically fit to screen
         self.resize_window()
+
+    def focus_input_from_length(self):
+        """
+        Focuses on the self.input_from_length field to allow input when F1 is pressed.
+        """
+        self.input_from_length.setFocus()
 
 
     def show_previous_image(self):
@@ -699,8 +707,12 @@ class ResponsiveMainWindow(QMainWindow):
         QMessageBox.information(self, "Export Successful", "Data exported to CSV successfully.")
 
     def add_box_data(self):
+        """
+        Add box data to the task queue after checking for duplicates.
+        If no duplicate is found, the data is queued and a countdown starts.
+        """
         if self.is_duplicate_entry():
-            QMessageBox.warning(self, "Duplicate Entry", "This entry already exists.")
+            QMessageBox.warning(self, "Duplicate Entry", "This entry already exists for the selected core size.")
             return
 
         # Get current selected file data
@@ -714,11 +726,16 @@ class ResponsiveMainWindow(QMainWindow):
             "box_id": self.box_id.text(),
             "current_file_data": current_file_data
         }
+        
+        # Add core_size to the task based on the selected radio button
+        task["core_size"] = "Half Core" if self.radio_half_core.isChecked() else "Whole Core"
+
         self.task_queue.append(task)
 
         # Start the countdown if it's not already active
         if not self.is_countdown_active:
             self.start_countdown()
+
     
     def start_countdown(self):
         # Start countdown for the first task in the queue
@@ -942,17 +959,27 @@ class ResponsiveMainWindow(QMainWindow):
         
     
     def is_duplicate_entry(self):
+        """
+        Check if a combination of hole_id, top_length, bottom_length, and core_size already exists in the database.
+        """
         hole_id = self.hole_id_edit.text()
         top_length = self.input_from_length.text()
         bottom_length = self.input_to_length.text()
         box_id = self.box_id.text()
 
+        # Determine the core_size based on the selected radio button
+        core_size = "Half Core" if self.radio_half_core.isChecked() else "Whole Core"
+
+        # Query to check if an entry with the same hole_id, top_length, bottom_length, box_id, and core_size exists
         cursor = self.connection.cursor()
-        cursor.execute("SELECT COUNT(*) FROM core_data WHERE hole_id=? AND top_length=? AND bottom_length=? AND box_id=?", 
-                       (hole_id, top_length, bottom_length, box_id))
-        
+        cursor.execute("""
+            SELECT COUNT(*) FROM core_data 
+            WHERE hole_id=? AND top_length=? AND bottom_length=? AND box_id=? AND core_size=?
+        """, (hole_id, top_length, bottom_length, box_id, core_size))
+
         count = cursor.fetchone()[0]
-        return count > 0  # Return True if there's a duplicate
+        return count > 0  # Return True if a duplicate entry is found
+
 
 
     def keyPressEvent(self, event):
